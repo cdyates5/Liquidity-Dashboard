@@ -1,0 +1,71 @@
+name: Build and publish dashboard
+
+on:
+  schedule:
+    # 02:00 UTC every Friday. The Fed's H.4.1 lands Thursday 16:30 ET
+    # (~20:30 UTC), so this always picks up the fresh Wednesday print.
+    # 02:00 UTC Fri = 12:00 Melbourne (AEST) / 13:00 (AEDT).
+    - cron: "0 2 * * 5"
+  workflow_dispatch:        # lets you rebuild on demand from the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - "rebuild.py"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two builds publish at once; let a running one finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build dashboard
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python3 rebuild.py --out site --name index.html
+          # Fail loudly if the build produced something implausible, so a bad
+          # fetch can never overwrite a good published site.
+          test -s site/index.html
+          python3 - <<'PY'
+          import sys, pathlib
+          h = pathlib.Path("site/index.html").read_text(encoding="utf-8")
+          assert len(h) > 300_000, f"output suspiciously small: {len(h)} bytes"
+          assert "/*__DATA__*/null" not in h, "data payload was not injected"
+          assert "/*__CHARTJS__*/" not in h, "Chart.js was not vendored inline"
+          print(f"OK: {len(h)/1024:.0f} KB")
+          PY
+
+      - name: Upload artifact for Pages
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
